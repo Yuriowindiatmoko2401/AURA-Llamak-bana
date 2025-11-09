@@ -8,16 +8,13 @@ from pydantic import Field
 class GeminiLLM(LLM):
     """Custom LangChain wrapper for Gemini models using ChatGoogleGenerativeAI"""
     api_key: str
-    model_name: str = "gemini-1.5-flash"
+    model_name: str = "gemini-2.0-flash-exp"
     _model: ChatGoogleGenerativeAI = Field(exclude=True)
 
-    def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash", **kwargs):
-        llm_kwargs = {
-            'api_key': api_key,
-            'model_name': model_name,
-            **kwargs
-        }
-        super().__init__(**llm_kwargs)
+    def __init__(self, api_key: str, model_name: str = "gemini-2.0-flash-exp", **kwargs):
+        # Initialize Pydantic model first
+        super().__init__(api_key=api_key, model_name=model_name, **kwargs)
+        # Set internal attributes
         object.__setattr__(self, '_model', ChatGoogleGenerativeAI(
             model=self.model_name,
             google_api_key=self.api_key
@@ -25,7 +22,8 @@ class GeminiLLM(LLM):
 
     @property
     def model(self):
-        return self._model
+        """Return the model name for CrewAI compatibility"""
+        return self.model_name
 
     @property
     def _llm_type(self) -> str:
@@ -45,7 +43,7 @@ class GeminiLLM(LLM):
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
         try:
-            response = self.model.invoke(prompt)
+            response = self._model.invoke(prompt)
             return response.content
         except Exception as e:
             return f"Error generating response: {str(e)}"
@@ -53,10 +51,10 @@ class GeminiLLM(LLM):
 class ZAILLM(LLM):
     """Custom LangChain wrapper for ZAI models"""
     api_key: str
-    model_name: str = "glm-4.5-air"  # Updated to use available model
+    model_name: str = "glm-4.6"  # Updated to use GLM-4.6 model
     base_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
-    def __init__(self, api_key: str, model_name: str = "glm-4.5-air", **kwargs):
+    def __init__(self, api_key: str, model_name: str = "glm-4.6", **kwargs):
         super().__init__(api_key=api_key, model_name=model_name, **kwargs)
         self.api_key = api_key
         self.model_name = model_name
@@ -64,6 +62,11 @@ class ZAILLM(LLM):
     @property
     def _llm_type(self) -> str:
         return "zai"
+
+    @property
+    def model(self):
+        """Return the model name for CrewAI compatibility"""
+        return self.model_name
 
     @property
     def model_identifier(self) -> str:

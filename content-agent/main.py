@@ -14,6 +14,7 @@ from agents.telegram_client import TelegramClient
 from agents.image_generator import ImageGenerator
 from agents.circlo_client import CircloClient
 from dotenv import load_dotenv
+from utils.debug_logger import debug_logger, PipelineStep
 
 # Load environment variables
 load_dotenv()
@@ -326,20 +327,40 @@ def extract_entities_from_message(message: str) -> Dict[str, Any]:
 @app.post("/circlo-hook")
 async def circlo_webhook(payload: CircloPayload, background_tasks: BackgroundTasks):
     """Handle Circlo webhooks - generate content responses"""
+    # Create unique session ID for this request
+    session_id = f"circlo_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{payload.user.id}"
+
+    # Start debugging session
+    debug_logger.start_session(
+        session_id=session_id,
+        user_name=payload.user.name,
+        message=payload.message
+    )
+
     try:
-        print(f"Received Circlo webhook from user {payload.user.name}")
-        print(f"Message: {payload.message}")
-        print(f"User preferences: {payload.user.preferredKeywords}, {payload.user.preferredNiches}")
+        # Step 1: Entity Extraction
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.ENTITY_EXTRACTION,
+            status="started",
+            details={"message": payload.message}
+        )
 
-        # Extract entities from user message
         entities = extract_entities_from_message(payload.message)
-        print(f"Extracted entities: {entities}")
+        debug_logger.log_extraction_result(session_id, entities)
 
-        # Parse schedule command
+        # Step 2: Schedule Parsing
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.SCHEDULE_PARSING,
+            status="started",
+            details={"command": entities["schedule_command"]}
+        )
+
         schedule_params = scheduler.parse_schedule_command(entities["schedule_command"])
-        print(f"Parsed schedule params: {schedule_params}")
+        debug_logger.log_schedule_parsing(session_id, schedule_params)
 
-        # Generate user preferences combining extracted info with profile
+        # Step 3: Generate user preferences
         user_preferences = {
             "niche": entities.get("topic", payload.profile.niche),
             "keywords": entities.get("keywords", payload.user.preferredKeywords),
@@ -348,25 +369,66 @@ async def circlo_webhook(payload: CircloPayload, background_tasks: BackgroundTas
             "content_types": payload.user.preferredNiches or ["educational", "entertaining"]
         }
 
-        # Generate response using CrewAI with both user_preferences and schedule_params
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.CONTENT_CREW_INIT,
+            status="started",
+            details={
+                "niche": user_preferences["niche"],
+                "keywords_count": len(user_preferences["keywords"]),
+                "total_posts": schedule_params.get("total_posts", 0)
+            }
+        )
+
+        # Step 4: Initialize Content Crew
         crew = ContentCrew(
             user_preferences=user_preferences,
             schedule_params=schedule_params
         )
 
-        # For now, create a simple response that acknowledges the scheduling request
+        # Step 5: Generate response message
         response_message = f"Hi {payload.user.name}! I'll help you create content about '{entities.get('topic', payload.profile.niche)}'. I'll schedule posts {entities['schedule_command']}. I'm generating {schedule_params['total_posts']} posts for you!"
+
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.CONTENT_GENERATION,
+            status="completed",
+            details={
+                "response_generated": True,
+                "topic": entities.get('topic', payload.profile.niche),
+                "total_posts": schedule_params['total_posts']
+            }
+        )
+
+        # Schedule background content generation
+        background_tasks.add_task(
+            process_schedule_request,
+            entities["schedule_command"],
+            user_preferences,
+            session_id
+        )
+
+        debug_logger.complete_session(session_id, "completed")
 
         # Return the response in the format Circlo expects
         return {
-            "response": response_message
+            "response": response_message,
+            "session_id": session_id
         }
 
     except Exception as e:
-        print(f"Error processing Circlo webhook: {e}")
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.CONTENT_GENERATION,
+            status="error",
+            error=str(e)
+        )
+        debug_logger.complete_session(session_id, "failed")
+
         # Return an error response in the format Circlo expects
         return {
-            "response": f"Sorry, I encountered an error processing your request: {str(e)}"
+            "response": f"Sorry, I encountered an error processing your request: {str(e)}",
+            "session_id": session_id
         }
 
 @app.post("/schedule-posts", response_model=ContentResponse)
@@ -522,33 +584,113 @@ async def get_stats():
         "uptime": "N/A"  # Could be implemented with startup time tracking
     }
 
+@app.get("/debug/sessions")
+async def get_debug_sessions():
+    """Get all debug session summaries"""
+    sessions = {}
+    for session_id in debug_logger.active_sessions.keys():
+        session_summary = debug_logger.get_session_summary(session_id)
+        if session_summary:
+            sessions[session_id] = session_summary
+
+    return {
+        "sessions": sessions,
+        "total_sessions": len(sessions),
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/debug/session/{session_id}")
+async def get_debug_session(session_id: str):
+    """Get detailed debug session information"""
+    session_summary = debug_logger.get_session_summary(session_id)
+
+    if not session_summary:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return session_summary
+
+@app.delete("/debug/sessions")
+async def clear_debug_sessions():
+    """Clear all debug sessions"""
+    debug_logger.active_sessions.clear()
+    return {
+        "message": "All debug sessions cleared",
+        "timestamp": datetime.now().isoformat()
+    }
+
 # Background task functions
-async def process_schedule_request(command: str, user_preferences: Dict[str, Any]):
+async def process_schedule_request(command: str, user_preferences: Dict[str, Any], session_id: str = None):
     """Process schedule request from Circlo webhook"""
+    if not session_id:
+        session_id = f"bg_process_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
     try:
         # Create a schedule ID
         schedule_id = f"circlo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.SCHEDULING_INIT,
+            status="started",
+            details={
+                "command": command,
+                "schedule_id": schedule_id
+            }
+        )
+
         # Parse schedule command
         schedule_params = scheduler.parse_schedule_command(command)
+        debug_logger.log_schedule_parsing(session_id, schedule_params)
 
         # Generate content and schedule
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.CONTENT_CREW_INIT,
+            status="started",
+            details={"background_process": True}
+        )
+
         crew = ContentCrew(
             user_preferences=user_preferences,
             schedule_params=schedule_params
         )
 
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.CONTENT_GENERATION,
+            status="started",
+            details={"crew_initialized": True}
+        )
+
         crew_result = crew.run()
         content_plan = extract_content_from_crew_result(crew_result)
 
+        debug_logger.log_content_generation(session_id, crew_result, len(content_plan) if content_plan else 0)
+
         if content_plan:
+            debug_logger.log_step(
+                session_id=session_id,
+                step=PipelineStep.IMAGE_PROMPT_OPTIMIZATION,
+                status="started",
+                details={"content_count": len(content_plan)}
+            )
+
             optimized_prompts = image_generator.optimize_prompts_for_replicate(content_plan)
+
             await generate_and_schedule_content(
                 schedule_id,
                 content_plan,
                 optimized_prompts,
                 schedule_params,
-                user_preferences
+                user_preferences,
+                session_id
+            )
+        else:
+            debug_logger.log_step(
+                session_id=session_id,
+                step=PipelineStep.CONTENT_EXTRACTION,
+                status="error",
+                error="No content plan generated"
             )
 
         # Send notification to Telegram
@@ -556,25 +698,55 @@ async def process_schedule_request(command: str, user_preferences: Dict[str, Any
             f"Started new schedule from Circlo webhook:\n• Command: {command}\n• Posts: {schedule_params['total_posts']}"
         )
 
+        debug_logger.complete_session(session_id, "completed")
+
     except Exception as e:
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.CONTENT_GENERATION,
+            status="error",
+            error=str(e)
+        )
+        debug_logger.complete_session(session_id, "failed")
+
         await telegram_client.send_error_notification(
             f"Error processing Circlo schedule request: {str(e)}",
-            {"command": command, "schedule_id": schedule_id}
+            {"command": command, "schedule_id": schedule_id, "session_id": session_id}
         )
 
 async def generate_and_schedule_content(schedule_id: str, content_plan: List[Dict[str, Any]],
                                       optimized_prompts: List[Dict[str, Any]],
                                       schedule_params: Dict[str, Any],
-                                      user_preferences: Dict[str, Any]):
+                                      user_preferences: Dict[str, Any],
+                                      session_id: str = None):
     """Generate images and schedule content posting"""
+    if not session_id:
+        session_id = f"gen_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
     try:
-        print(f"Starting content generation for schedule {schedule_id}")
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.IMAGE_GENERATION,
+            status="started",
+            details={
+                "schedule_id": schedule_id,
+                "content_count": len(content_plan),
+                "prompts_count": len(optimized_prompts)
+            }
+        )
 
         # Generate images
-        print("Generating images...")
         image_results = image_generator.generate_batch_images(optimized_prompts)
+        debug_logger.log_image_generation(session_id, image_results)
 
         # Combine content with generated images
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.CONTENT_EXTRACTION,
+            status="started",
+            details={"combining_content_with_images": True}
+        )
+
         final_content = []
         for i, content in enumerate(content_plan):
             # Find corresponding image result
@@ -586,12 +758,24 @@ async def generate_and_schedule_content(schedule_id: str, content_plan: List[Dic
                 'image_status': image_result['status'] if image_result else 'failed'
             })
 
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.POST_SCHEDULING,
+            status="started",
+            details={
+                "final_content_count": len(final_content),
+                "images_successful": len([r for r in image_results if r['status'] == 'success'])
+            }
+        )
+
         # Create posting schedule
         posting_schedule_id = scheduler.create_posting_schedule(
             content_plan=final_content,
             schedule_params=schedule_params,
             post_callback=post_to_telegram
         )
+
+        debug_logger.log_scheduling(session_id, posting_schedule_id, len(final_content))
 
         # Store schedule info
         active_schedules[schedule_id] = {
@@ -602,25 +786,56 @@ async def generate_and_schedule_content(schedule_id: str, content_plan: List[Dic
             'created_at': datetime.now().isoformat()
         }
 
-        print(f"Content generation completed for schedule {schedule_id}")
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.COMPLETION,
+            status="completed",
+            details={
+                "schedule_id": schedule_id,
+                "content_ready": True,
+                "images_ready": len([r for r in image_results if r['status'] == 'success'])
+            }
+        )
 
         # Send notification to Telegram
         await telegram_client.send_status_update(
             f"Content generation completed for schedule {schedule_id}:\n• {len(final_content)} posts ready\n• Images generated: {len([r for r in image_results if r['status'] == 'success'])}"
         )
 
+        debug_logger.complete_session(session_id, "completed")
+
     except Exception as e:
-        print(f"Error in generate_and_schedule_content: {e}")
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.IMAGE_GENERATION,
+            status="error",
+            error=str(e)
+        )
+        debug_logger.complete_session(session_id, "failed")
+
         await telegram_client.send_error_notification(
             f"Error generating content for schedule {schedule_id}: {str(e)}"
         )
 
 async def post_to_telegram(content: Dict[str, Any]) -> Dict[str, Any]:
     """Post content to Telegram"""
+    session_id = f"telegram_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
     try:
         caption = content.get('caption', '')
         hashtags = content.get('hashtags', [])
         image_url = content.get('image_url')
+
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.TELEGRAM_POSTING,
+            status="started",
+            details={
+                "has_caption": bool(caption),
+                "hashtags_count": len(hashtags),
+                "has_image": bool(image_url)
+            }
+        )
 
         if image_url:
             # Send image post
@@ -629,10 +844,20 @@ async def post_to_telegram(content: Dict[str, Any]) -> Dict[str, Any]:
             # Send text post
             result = await telegram_client.send_text_post(caption, hashtags)
 
+        debug_logger.log_telegram_post(session_id, result)
+        debug_logger.complete_session(session_id, "completed")
+
         return result
 
     except Exception as e:
-        print(f"Error posting to Telegram: {e}")
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.TELEGRAM_POSTING,
+            status="error",
+            error=str(e)
+        )
+        debug_logger.complete_session(session_id, "failed")
+
         return {
             'status': 'error',
             'error': str(e),
