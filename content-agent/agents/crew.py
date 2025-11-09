@@ -1,5 +1,5 @@
 from crewai import Agent, Task, Crew, Process
-from agents.llm_wrappers import GeminiLLM, ZAILLM
+from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 import json
 
@@ -19,15 +19,32 @@ class ContentCrew:
 
     def _get_llm(self):
         # Configure based on user's preferred LLM
-        if os.getenv("CORE_AGENT_TYPE") == "gemini":
-            return GeminiLLM(api_key=os.getenv("GEMINI_API_KEY"))
-        elif os.getenv("CORE_AGENT_TYPE") == "zai":
-            return ZAILLM(api_key=os.getenv("ZAI_API_KEY"))
+        core_agent_type = os.getenv("CORE_AGENT_TYPE", "gemini")
+        print(f"Initializing LLM with type: {core_agent_type}")
+
+        if core_agent_type == "gemini":
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise ValueError("GEMINI_API_KEY environment variable is not set")
+            return ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash-exp",
+                google_api_key=api_key
+            )
         else:
-            raise ValueError("Unsupported CORE_AGENT_TYPE. Use 'gemini' or 'zai'.")
+            raise ValueError("Currently only 'gemini' is supported. Set CORE_AGENT_TYPE=gemini")
 
     def _create_agents(self):
         # Define all the specialized agents using the custom LLM
+        # Add model attribute for CrewAI compatibility
+        model_identifier = getattr(self.llm, 'model_identifier', 'gemini-2.0-flash-exp')
+
+        # Ensure model_identifier is not empty
+        if not model_identifier or model_identifier.strip() == "":
+            model_identifier = "gemini-2.0-flash-exp"
+
+        print(f"Using model identifier: {model_identifier}")
+        print(f"LLM type: {type(self.llm)}")
+
         self.trend_researcher = Agent(
             role='Trend Research Specialist',
             goal='Identify the most relevant and engaging trends in the user\'s niche',

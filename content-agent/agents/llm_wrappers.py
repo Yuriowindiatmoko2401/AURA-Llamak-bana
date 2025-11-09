@@ -31,6 +31,18 @@ class GeminiLLM(LLM):
     def _llm_type(self) -> str:
         return "gemini"
 
+    @property
+    def model_identifier(self) -> str:
+        """Return the model identifier for CrewAI compatibility"""
+        return self.model_name
+
+    def to_dict(self):
+        """Return a dictionary representation for CrewAI compatibility"""
+        return {
+            'model': self.model_name,
+            'api_key': self.api_key
+        }
+
     def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
         try:
             response = self.model.invoke(prompt)
@@ -44,13 +56,19 @@ class ZAILLM(LLM):
     model_name: str = "glm-4"
     base_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, api_key: str, model_name: str = "glm-4", **kwargs):
+        super().__init__(api_key=api_key, model_name=model_name, **kwargs)
         self.api_key = api_key
+        self.model_name = model_name
 
     @property
     def _llm_type(self) -> str:
         return "zai"
+
+    @property
+    def model_identifier(self) -> str:
+        """Return the model identifier for CrewAI compatibility"""
+        return self.model_name
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
         try:

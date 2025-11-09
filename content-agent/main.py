@@ -84,11 +84,30 @@ app.add_middleware(
 
 
 # Pydantic models for API requests/responses
+class CircloMessage(BaseModel):
+    """Model for individual message in Circlo history"""
+    role: str
+    content: str
+
+class CircloUser(BaseModel):
+    """Model for Circlo user information"""
+    id: str
+    name: str
+    preferredKeywords: List[str]
+    preferredNiches: List[str]
+
+class CircloProfile(BaseModel):
+    """Model for Circlo agent profile"""
+    id: str
+    name: str
+    niche: str
+
 class CircloPayload(BaseModel):
-    """Model for Circlo webhook payload"""
-    event_type: str
-    user_id: str
-    data: Dict[str, Any]
+    """Model for Circlo webhook payload according to documentation"""
+    history: List[CircloMessage]
+    message: str
+    user: CircloUser
+    profile: CircloProfile
 
 class CircloAuthRequest(BaseModel):
     """Model for Circlo authentication request"""
@@ -129,6 +148,25 @@ async def root():
         "version": "1.0.0",
         "timestamp": datetime.now().isoformat()
     }
+
+@app.post("/")
+async def root_webhook(payload: dict, background_tasks: BackgroundTasks):
+    """
+    Handle POST requests to root endpoint (for GetCirclo webhook compatibility)
+    This forwards the request to the main Circlo webhook handler
+    """
+    try:
+        # Convert the dict payload to CircloPayload format
+        circlo_payload = CircloPayload(**payload)
+
+        # Forward to the existing webhook handler
+        return await circlo_webhook(circlo_payload, background_tasks)
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Error processing webhook: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }, 500
 
 @app.get("/health")
 async def health_check():
@@ -220,41 +258,116 @@ async def circlo_status():
             "timestamp": datetime.now().isoformat()
         }, 500
 
+def extract_entities_from_message(message: str) -> Dict[str, Any]:
+    """
+    Extract entities from user message using pattern matching and LLM
+    Messages like: "buatkan postingan rutin per 2 menit satu jam ke depan tentang music texas"
+    """
+    import re
+
+    # Extract schedule information using regex patterns
+    schedule_command = ""
+    topic = ""
+
+    # Pattern for frequency and duration in Indonesian
+    schedule_patterns = [
+        r'(?:buatkan|buat)\s+(?:postingan\s+)?(?:rutin\s+)?per\s+(\d+)\s+(?:menit|jam|hari)\s+(?:\d+\s+)?(?:menit|jam|hari)?\s+ke\s+depan',
+        r'post\s+(?:each|every)\s+(\d+)\s+(?:minutes?|hours?|days?)\s+(?:for\s+)?(?:the\s+next\s+)?(\d+\s+(?:minutes?|hours?|days?))?',
+        r'(?:setiap|tiap)\s+(\d+)\s+(?:menit|jam|hari)\s+(?:selama\s+)?(\d+\s+(?:menit|jam|hari))?',
+    ]
+
+    for pattern in schedule_patterns:
+        match = re.search(pattern, message.lower())
+        if match:
+            if "menit" in message.lower() or "jam" in message.lower():
+                # Indonesian pattern
+                if "menit" in message.lower() and "jam" in message.lower():
+                    frequency_match = re.search(r'per\s+(\d+)\s+menit', message.lower())
+                    duration_match = re.search(r'satu\s+jam|1\s+jam', message.lower())
+                    if frequency_match:
+                        freq = frequency_match.group(1)
+                        schedule_command = f"post each {freq} minutes for 1 hour"
+                    elif duration_match:
+                        schedule_command = "post each 2 minutes for 1 hour"
+                else:
+                    schedule_command = f"post {message.lower()}"
+            else:
+                # English pattern
+                schedule_command = f"post {match.group(0)}"
+            break
+
+    # Default schedule if none found
+    if not schedule_command:
+        schedule_command = "post each 2 minutes for 1 hour"
+
+    # Extract topic/keywords
+    topic_patterns = [
+        r'tentang\s+([^,.!?]+)',
+        r'about\s+([^,.!?]+)',
+        r'mengenai\s+([^,.!?]+)',
+    ]
+
+    for pattern in topic_patterns:
+        match = re.search(pattern, message.lower())
+        if match:
+            topic = match.group(1).strip()
+            break
+
+    # If no topic found, use profile niche or default
+    if not topic:
+        topic = "general content"
+
+    return {
+        "schedule_command": schedule_command,
+        "topic": topic,
+        "keywords": topic.split() if topic else ["content", "social media"]
+    }
+
 @app.post("/circlo-hook")
 async def circlo_webhook(payload: CircloPayload, background_tasks: BackgroundTasks):
-    """Handle Circlo webhooks"""
+    """Handle Circlo webhooks - generate content responses"""
     try:
-        print(f"Received Circlo webhook: {payload.event_type}")
+        print(f"Received Circlo webhook from user {payload.user.name}")
+        print(f"Message: {payload.message}")
+        print(f"User preferences: {payload.user.preferredKeywords}, {payload.user.preferredNiches}")
 
-        # Process different event types
-        if payload.event_type == "schedule_request":
-            # Extract schedule command from payload
-            command = payload.data.get("command", "")
-            user_preferences = payload.data.get("user_preferences", {})
+        # Extract entities from user message
+        entities = extract_entities_from_message(payload.message)
+        print(f"Extracted entities: {entities}")
 
-            # Schedule content generation
-            background_tasks.add_task(
-                process_schedule_request,
-                command,
-                user_preferences
-            )
+        # Parse schedule command
+        schedule_params = scheduler.parse_schedule_command(entities["schedule_command"])
+        print(f"Parsed schedule params: {schedule_params}")
 
-            return {
-                "status": "accepted",
-                "message": "Schedule request received and processing started",
-                "event_type": payload.event_type,
-                "timestamp": datetime.now().isoformat()
-            }
+        # Generate user preferences combining extracted info with profile
+        user_preferences = {
+            "niche": entities.get("topic", payload.profile.niche),
+            "keywords": entities.get("keywords", payload.user.preferredKeywords),
+            "brand_voice": "helpful and creative",
+            "target_audience": "general",
+            "content_types": payload.user.preferredNiches or ["educational", "entertaining"]
+        }
 
-        else:
-            return {
-                "status": "ignored",
-                "message": f"Unsupported event type: {payload.event_type}",
-                "timestamp": datetime.now().isoformat()
-            }
+        # Generate response using CrewAI with both user_preferences and schedule_params
+        crew = ContentCrew(
+            user_preferences=user_preferences,
+            schedule_params=schedule_params
+        )
+
+        # For now, create a simple response that acknowledges the scheduling request
+        response_message = f"Hi {payload.user.name}! I'll help you create content about '{entities.get('topic', payload.profile.niche)}'. I'll schedule posts {entities['schedule_command']}. I'm generating {schedule_params['total_posts']} posts for you!"
+
+        # Return the response in the format Circlo expects
+        return {
+            "response": response_message
+        }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")
+        print(f"Error processing Circlo webhook: {e}")
+        # Return an error response in the format Circlo expects
+        return {
+            "response": f"Sorry, I encountered an error processing your request: {str(e)}"
+        }
 
 @app.post("/schedule-posts", response_model=ContentResponse)
 async def schedule_posts(request: ScheduleRequest, background_tasks: BackgroundTasks):
