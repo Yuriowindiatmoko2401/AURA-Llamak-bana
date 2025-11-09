@@ -1,5 +1,6 @@
 from crewai import Agent, Task, Crew, Process
 from langchain_google_genai import ChatGoogleGenerativeAI
+from agents.llm_wrappers import GeminiLLM, ZAILLM
 import os
 import json
 
@@ -26,12 +27,14 @@ class ContentCrew:
             api_key = os.getenv("GEMINI_API_KEY")
             if not api_key:
                 raise ValueError("GEMINI_API_KEY environment variable is not set")
-            return ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash-exp",
-                google_api_key=api_key
-            )
+            return GeminiLLM(api_key=api_key, model_name="gemini-2.0-flash-exp")
+        elif core_agent_type == "zai":
+            api_key = os.getenv("ZAI_API_KEY")
+            if not api_key:
+                raise ValueError("ZAI_API_KEY environment variable is not set")
+            return ZAILLM(api_key=api_key)
         else:
-            raise ValueError("Currently only 'gemini' is supported. Set CORE_AGENT_TYPE=gemini")
+            raise ValueError("Unsupported CORE_AGENT_TYPE. Use 'gemini' or 'zai'.")
 
     def _create_agents(self):
         # Define all the specialized agents using the custom LLM

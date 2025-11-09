@@ -53,10 +53,10 @@ class GeminiLLM(LLM):
 class ZAILLM(LLM):
     """Custom LangChain wrapper for ZAI models"""
     api_key: str
-    model_name: str = "glm-4"
+    model_name: str = "glm-4.5-air"  # Updated to use available model
     base_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
-    def __init__(self, api_key: str, model_name: str = "glm-4", **kwargs):
+    def __init__(self, api_key: str, model_name: str = "glm-4.5-air", **kwargs):
         super().__init__(api_key=api_key, model_name=model_name, **kwargs)
         self.api_key = api_key
         self.model_name = model_name
@@ -92,5 +92,16 @@ class ZAILLM(LLM):
             result = response.json()
             return result["choices"][0]["message"]["content"]
 
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 429:
+                return "Error: ZAI API balance insufficient. Please top up your account at https://open.bigmodel.cn/"
+            elif response.status_code == 401:
+                return "Error: ZAI API key is invalid or expired. Please check your ZAI_API_KEY."
+            elif response.status_code == 400:
+                error_data = response.json()
+                error_msg = error_data.get("error", {}).get("message", "Unknown error")
+                return f"Error: ZAI API request failed - {error_msg}"
+            else:
+                return f"Error: ZAI API HTTP {response.status_code} - {str(e)}"
         except Exception as e:
             return f"Error generating response: {str(e)}"

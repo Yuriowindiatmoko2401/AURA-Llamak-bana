@@ -1,4 +1,9 @@
-from telegram import Bot, InputFile
+try:
+    from telegram import Bot, InputFile
+    from telegram.request import BaseRequest, HTTPXRequest
+except ImportError:
+    # Fallback for older versions
+    from telegram import Bot, InputFile
 import os
 import requests
 from typing import Dict, Any, Optional, List
@@ -21,6 +26,7 @@ class TelegramClient:
     async def _get_bot(self):
         """Get bot instance asynchronously"""
         if self.bot is None:
+            # Simple bot initialization - works with updated python-telegram-bot
             self.bot = Bot(token=self.bot_token)
         return self.bot
 

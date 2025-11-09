@@ -7,6 +7,10 @@ import asyncio
 import os
 import json
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import our agents
 from agents.scheduler import PostScheduler
@@ -22,7 +26,7 @@ async def test_components():
 
     # Test 1: Environment Variables
     print("\n1. Testing Environment Variables...")
-    required_vars = ["CORE_AGENT_TYPE", "GEMINI_API_KEY", "REPLICATE_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
+    required_vars = ["CORE_AGENT_TYPE", "GEMINI_API_KEY", "ZAI_API_KEY", "REPLICATE_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
     missing_vars = [var for var in required_vars if not os.getenv(var)]
 
     if missing_vars:
@@ -53,9 +57,11 @@ async def test_components():
         if os.getenv("CORE_AGENT_TYPE") == "gemini":
             from agents.llm_wrappers import GeminiLLM
             llm = GeminiLLM(api_key=os.getenv("GEMINI_API_KEY"))
-        else:
+        elif os.getenv("CORE_AGENT_TYPE") == "zai":
             from agents.llm_wrappers import ZAILLM
             llm = ZAILLM(api_key=os.getenv("ZAI_API_KEY"))
+        else:
+            raise ValueError(f"Unsupported CORE_AGENT_TYPE: {os.getenv('CORE_AGENT_TYPE')}")
 
         test_prompt = "Generate a simple greeting for a social media post."
         response = llm._call(test_prompt)
