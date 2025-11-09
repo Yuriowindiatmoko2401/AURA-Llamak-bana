@@ -2,7 +2,7 @@ import replicate
 import os
 import json
 from typing import List, Dict, Any, Optional
-from agents.llm_wrappers import GeminiLLM, ZAILLM, DeepseekLLM
+from agents.llm_wrappers import GeminiLLM, ZAILLM, DeepseekLLM, get_fallback_llm
 import time
 
 class ImageGenerator:
@@ -12,6 +12,12 @@ class ImageGenerator:
         self.model_name = os.getenv("REPLICATE_MODEL", "ideogram-ai/ideogram-v3-turbo")
 
     def _get_llm(self):
+        # Check if fallback mode is enabled
+        if os.getenv("ENABLE_FALLBACK_LLM", "false").lower() == "true":
+            print("🔄 Using fallback LLM with automatic provider switching")
+            return get_fallback_llm()
+
+        # Use specific provider based on CORE_AGENT_TYPE
         if os.getenv("CORE_AGENT_TYPE") == "gemini":
             return GeminiLLM(api_key=os.getenv("GEMINI_API_KEY"))
         elif os.getenv("CORE_AGENT_TYPE") == "zai":
@@ -70,29 +76,54 @@ class ImageGenerator:
 
             try:
                 response = self.llm._call(prompt)
-                optimized_prompt = json.loads(response)
+
+                # Clean up response - remove markdown formatting if present
+                cleaned_response = response.strip()
+                if cleaned_response.startswith('```json'):
+                    # Find the JSON content between ```json and ```
+                    start_idx = cleaned_response.find('```json') + 7
+                    end_idx = cleaned_response.find('```', start_idx)
+                    if end_idx != -1:
+                        cleaned_response = cleaned_response[start_idx:end_idx].strip()
+                elif cleaned_response.startswith('```'):
+                    # Find the JSON content between ``` and ```
+                    start_idx = cleaned_response.find('```') + 3
+                    end_idx = cleaned_response.find('```', start_idx)
+                    if end_idx != -1:
+                        cleaned_response = cleaned_response[start_idx:end_idx].strip()
+
+                optimized_prompt = json.loads(cleaned_response)
+
+                # Validate the optimized prompt has required fields
+                if not optimized_prompt.get('prompt'):
+                    raise ValueError("Missing prompt field in optimized response")
+
                 prompts.append({
                     'post_index': i,
                     'original_content': content,
                     **optimized_prompt
                 })
-            except json.JSONDecodeError:
+
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error for post {i}, using fallback prompt")
                 # Fallback prompt structure
+                fallback_prompt = f"Create a beautiful, modern image of {image_concept}. Vibrant colors, clean composition, suitable for social media."
                 prompts.append({
                     'post_index': i,
                     'original_content': content,
-                    'prompt': f"Create a beautiful, modern image of {image_concept}. Vibrant colors, clean composition, suitable for social media.",
+                    'prompt': fallback_prompt,
                     'negative_prompt': "blurry, low quality, distorted, ugly",
                     'style': "modern digital art",
                     'aspect_ratio': "1:1"
                 })
             except Exception as e:
-                print(f"Error optimizing prompt for post {i}: {e}")
+                print(f"Error optimizing prompt for post {i}: {e}, using fallback")
                 # Add fallback prompt
+                fallback_prompt = f"Create a beautiful, modern image of {image_concept}. Vibrant colors, clean composition."
                 prompts.append({
                     'post_index': i,
                     'original_content': content,
-                    'prompt': f"Create a beautiful, modern image of {image_concept}. Vibrant colors, clean composition.",
+                    'prompt': fallback_prompt,
                     'negative_prompt': "blurry, low quality",
                     'style': "digital art",
                     'aspect_ratio': "1:1"
@@ -116,12 +147,12 @@ class ImageGenerator:
         aspect_ratio = prompt_data.get('aspect_ratio', '1:1')
 
         if not prompt:
+            print(f"Empty prompt received, cannot generate image")
             return None
 
         for attempt in range(max_retries):
             try:
                 print(f"Generating image (attempt {attempt + 1}/{max_retries})...")
-                print(f"Prompt: {prompt[:100]}...")
 
                 # Generate image using Replicate
                 input_data = {
@@ -139,8 +170,24 @@ class ImageGenerator:
                     input=input_data
                 )
 
-                # Replicate returns a list of URLs
-                if output and len(output) > 0:
+                # Check if output is an error message string
+                if isinstance(output, str):
+                    if "error" in output.lower() or "unauthorized" in output.lower() or "invalid" in output.lower():
+                        raise Exception(f"Replicate API error: {output}")
+                    elif output.startswith('http'):
+                        # Direct URL string
+                        print(f"Image generated successfully: {output}")
+                        return output
+
+                # Replicate returns a response object with an output field containing URLs
+                if output and hasattr(output, 'output'):
+                    # output.output is a list of URLs
+                    if len(output.output) > 0:
+                        image_url = output.output[0]
+                        print(f"Image generated successfully: {image_url}")
+                        return image_url
+                elif isinstance(output, list) and len(output) > 0:
+                    # Fallback: output is directly a list of URLs
                     image_url = output[0]
                     print(f"Image generated successfully: {image_url}")
                     return image_url

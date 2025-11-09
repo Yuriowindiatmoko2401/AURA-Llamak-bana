@@ -1,7 +1,7 @@
 import json
 from typing import List, Dict, Any, Optional
 import os
-from agents.llm_wrappers import GeminiLLM, ZAILLM, DeepseekLLM
+from agents.llm_wrappers import GeminiLLM, ZAILLM, DeepseekLLM, get_fallback_llm
 from datetime import datetime, timedelta
 
 class ContentPlanner:
@@ -9,6 +9,12 @@ class ContentPlanner:
         self.llm = self._get_llm()
 
     def _get_llm(self):
+        # Check if fallback mode is enabled
+        if os.getenv("ENABLE_FALLBACK_LLM", "false").lower() == "true":
+            print("🔄 Using fallback LLM with automatic provider switching")
+            return get_fallback_llm()
+
+        # Use specific provider based on CORE_AGENT_TYPE
         if os.getenv("CORE_AGENT_TYPE") == "gemini":
             return GeminiLLM(api_key=os.getenv("GEMINI_API_KEY"))
         elif os.getenv("CORE_AGENT_TYPE") == "zai":

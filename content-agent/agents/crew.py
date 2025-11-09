@@ -27,7 +27,7 @@ class ContentCrew:
             api_key = os.getenv("GEMINI_API_KEY")
             if not api_key:
                 raise ValueError("GEMINI_API_KEY environment variable is not set")
-            return GeminiLLM(api_key=api_key, model_name="gemini-2.0-flash-exp")
+            return GeminiLLM(api_key=api_key, model_name="gemini-2.5-pro")
         elif core_agent_type == "zai":
             api_key = os.getenv("ZAI_API_KEY")
             if not api_key:
@@ -45,11 +45,11 @@ class ContentCrew:
     def _create_agents(self):
         # Define all the specialized agents using the custom LLM
         # Add model attribute for CrewAI compatibility
-        model_identifier = getattr(self.llm, 'model_identifier', 'gemini-2.0-flash-exp')
+        model_identifier = getattr(self.llm, 'model_identifier', 'gemini-2.5-pro')
 
         # Ensure model_identifier is not empty
         if not model_identifier or model_identifier.strip() == "":
-            model_identifier = "gemini-2.0-flash-exp"
+            model_identifier = "gemini-2.5-pro"
 
         print(f"Using model identifier: {model_identifier}")
         print(f"LLM type: {type(self.llm)}")

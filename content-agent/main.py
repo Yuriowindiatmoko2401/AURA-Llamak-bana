@@ -140,6 +140,12 @@ class ContentResponse(BaseModel):
 active_schedules = {}
 content_cache = {}
 
+# Platform configuration
+POSTING_PLATFORMS = {
+    "telegram": True,
+    "circlo": os.getenv("ENABLE_CIRCLO_POSTING", "false").lower() == "true"
+}
+
 @app.get("/")
 async def root():
     """Root endpoint"""
@@ -179,9 +185,11 @@ async def health_check():
         "scheduler_stats": stats,
         "services": {
             "telegram": "connected" if telegram_client else "disconnected",
+            "circlo": "ready" if circlo_client else "not_ready",
             "image_generator": "ready" if image_generator else "not_ready",
             "scheduler": "active" if scheduler else "inactive"
-        }
+        },
+        "platforms": POSTING_PLATFORMS
     }
 
 @app.post("/circlo-auth")
@@ -289,7 +297,7 @@ def extract_entities_from_message(message: str) -> Dict[str, Any]:
                         freq = frequency_match.group(1)
                         schedule_command = f"post each {freq} minutes for 1 hour"
                     elif duration_match:
-                        schedule_command = "post each 2 minutes for 1 hour"
+                        schedule_command = "post each 4 minutes for 1 hour"
                 else:
                     schedule_command = f"post {message.lower()}"
             else:
@@ -299,7 +307,7 @@ def extract_entities_from_message(message: str) -> Dict[str, Any]:
 
     # Default schedule if none found
     if not schedule_command:
-        schedule_command = "post each 2 minutes for 1 hour"
+        schedule_command = "post each 4 minutes for 1 hour"
 
     # Extract topic/keywords
     topic_patterns = [
@@ -465,9 +473,14 @@ async def schedule_posts(request: ScheduleRequest, background_tasks: BackgroundT
         content_plan = extract_content_from_crew_result(crew_result)
 
         if not content_plan:
+            print("CrewAI failed to generate valid content, using fallback mechanism...")
+            # Generate fallback content
+            content_plan = generate_fallback_content(request.user_preferences, schedule_params)
+
+        if not content_plan:
             raise HTTPException(
                 status_code=500,
-                detail="Failed to generate content from CrewAI workflow"
+                detail="Failed to generate content from CrewAI workflow and fallback mechanism"
             )
 
         # Optimize image prompts and generate images
@@ -618,6 +631,170 @@ async def clear_debug_sessions():
         "timestamp": datetime.now().isoformat()
     }
 
+@app.get("/platforms")
+async def get_platforms():
+    """Get available posting platforms and their status"""
+    return {
+        "platforms": POSTING_PLATFORMS,
+        "circlo_enabled": POSTING_PLATFORMS.get("circlo", False),
+        "telegram_enabled": POSTING_PLATFORMS.get("telegram", False),
+        "message": "Enable Circlo posting by setting ENABLE_CIRCLO_POSTING=true in environment variables",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.post("/platforms/circlo/enable")
+async def enable_circlo_posting():
+    """Enable Circlo posting platform"""
+    global POSTING_PLATFORMS
+    POSTING_PLATFORMS["circlo"] = True
+    os.environ["ENABLE_CIRCLO_POSTING"] = "true"
+
+    return {
+        "message": "Circlo posting enabled successfully",
+        "platforms": POSTING_PLATFORMS,
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.post("/platforms/circlo/disable")
+async def disable_circlo_posting():
+    """Disable Circlo posting platform"""
+    global POSTING_PLATFORMS
+    POSTING_PLATFORMS["circlo"] = False
+    os.environ["ENABLE_CIRCLO_POSTING"] = "false"
+
+    return {
+        "message": "Circlo posting disabled successfully",
+        "platforms": POSTING_PLATFORMS,
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.post("/test-circlo-post")
+async def test_circlo_post():
+    """Test posting to Circlo with sample data"""
+    if not POSTING_PLATFORMS.get("circlo", False):
+        return {
+            "status": "error",
+            "message": "Circlo posting is not enabled. Enable it first via /platforms/circlo/enable"
+        }, 400
+
+    sample_content = {
+        "caption": "Check out this amazing tech review! 🚀",
+        "hashtags": ["#tech", "#review", "#gadgets"],
+        "keywords": ["tech", "review", "gadgets"],
+        "image_url": "https://replicate.delivery/pbxt/test/output.jpg"
+    }
+
+    sample_user_preferences = {
+        "niche": "Tech Reviewer",
+        "profile_type": "general"
+    }
+
+    try:
+        result = await circlo_client.post_content_to_circlo(sample_content, sample_user_preferences)
+        return {
+            "status": "success",
+            "message": "Circlo post test completed",
+            "result": result,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Circlo post test failed: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }, 500
+
+@app.post("/post-direct")
+async def post_direct_content(request: dict):
+    """Post content directly to Circlo without scheduling - posts everything sequentially"""
+    if not POSTING_PLATFORMS.get("circlo", False):
+        return {
+            "status": "error",
+            "message": "Circlo posting is not enabled. Enable it first via /platforms/circlo/enable"
+        }, 400
+
+    try:
+        content_plan = request.get("content_plan", [])
+        user_preferences = request.get("user_preferences", {"niche": "general", "profile_type": "general"})
+        delay_between_posts = request.get("delay_seconds", 30)  # Default 30 seconds between posts
+
+        if not content_plan:
+            return {
+                "status": "error",
+                "message": "No content plan provided"
+            }, 400
+
+        print(f"🚀 Starting direct sequential posting of {len(content_plan)} posts...")
+        print(f"⏱️  Delay between posts: {delay_between_posts} seconds")
+
+        results = []
+        successful_posts = 0
+        failed_posts = 0
+
+        for i, content in enumerate(content_plan):
+            print(f"\n📤 Posting {i+1}/{len(content_plan)}: {content.get('caption', '')[:50]}...")
+
+            try:
+                # Post to Circlo
+                result = await circlo_client.post_content_to_circlo(content, user_preferences)
+
+                if result.get("status") == "success":
+                    successful_posts += 1
+                    print(f"✅ Post {i+1} successful!")
+                    results.append({
+                        "post_number": i + 1,
+                        "status": "success",
+                        "result": result,
+                        "caption_preview": content.get('caption', '')[:50]
+                    })
+                else:
+                    failed_posts += 1
+                    print(f"❌ Post {i+1} failed: {result.get('error')}")
+                    results.append({
+                        "post_number": i + 1,
+                        "status": "failed",
+                        "error": result.get('error'),
+                        "caption_preview": content.get('caption', '')[:50]
+                    })
+
+            except Exception as e:
+                failed_posts += 1
+                error_msg = f"Error posting {i+1}: {str(e)}"
+                print(f"❌ {error_msg}")
+                results.append({
+                    "post_number": i + 1,
+                    "status": "error",
+                    "error": error_msg,
+                    "caption_preview": content.get('caption', '')[:50]
+                })
+
+            # Add delay between posts (except for the last one)
+            if i < len(content_plan) - 1 and delay_between_posts > 0:
+                print(f"⏳ Waiting {delay_between_posts} seconds before next post...")
+                await asyncio.sleep(delay_between_posts)
+
+        print(f"\n🎉 Direct posting completed!")
+        print(f"✅ Successful: {successful_posts}")
+        print(f"❌ Failed: {failed_posts}")
+        print(f"📊 Success rate: {(successful_posts / len(content_plan) * 100):.1f}%")
+
+        return {
+            "status": "completed",
+            "total_posts": len(content_plan),
+            "successful_posts": successful_posts,
+            "failed_posts": failed_posts,
+            "success_rate": successful_posts / len(content_plan) * 100,
+            "results": results,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Direct posting failed: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }, 500
+
 # Background task functions
 async def process_schedule_request(command: str, user_preferences: Dict[str, Any], session_id: str = None):
     """Process schedule request from Circlo webhook"""
@@ -667,6 +844,17 @@ async def process_schedule_request(command: str, user_preferences: Dict[str, Any
 
         debug_logger.log_content_generation(session_id, crew_result, len(content_plan) if content_plan else 0)
 
+        if not content_plan:
+            print("CrewAI failed to generate valid content, using fallback mechanism...")
+            debug_logger.log_step(
+                session_id=session_id,
+                step=PipelineStep.CONTENT_EXTRACTION,
+                status="warning",
+                error="CrewAI content extraction failed, using fallback"
+            )
+            # Generate fallback content
+            content_plan = generate_fallback_content(user_preferences, schedule_params)
+
         if content_plan:
             debug_logger.log_step(
                 session_id=session_id,
@@ -690,7 +878,7 @@ async def process_schedule_request(command: str, user_preferences: Dict[str, Any
                 session_id=session_id,
                 step=PipelineStep.CONTENT_EXTRACTION,
                 status="error",
-                error="No content plan generated"
+                error="No content plan generated from CrewAI or fallback"
             )
 
         # Send notification to Telegram
@@ -768,11 +956,11 @@ async def generate_and_schedule_content(schedule_id: str, content_plan: List[Dic
             }
         )
 
-        # Create posting schedule
+        # Create posting schedule with multi-platform support
         posting_schedule_id = scheduler.create_posting_schedule(
             content_plan=final_content,
             schedule_params=schedule_params,
-            post_callback=post_to_telegram
+            post_callback=lambda content: post_to_multiple_platforms(content, user_preferences)
         )
 
         debug_logger.log_scheduling(session_id, posting_schedule_id, len(final_content))
@@ -816,6 +1004,76 @@ async def generate_and_schedule_content(schedule_id: str, content_plan: List[Dic
         await telegram_client.send_error_notification(
             f"Error generating content for schedule {schedule_id}: {str(e)}"
         )
+
+async def post_to_multiple_platforms(content: Dict[str, Any], user_preferences: Dict[str, Any]) -> Dict[str, Any]:
+    """Post content to multiple enabled platforms"""
+    session_id = f"multi_platform_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    results = {
+        "session_id": session_id,
+        "platforms": {},
+        "overall_status": "success",
+        "timestamp": datetime.now().isoformat()
+    }
+
+    try:
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.TELEGRAM_POSTING,  # Using existing step for now
+            status="started",
+            details={
+                "enabled_platforms": [platform for platform, enabled in POSTING_PLATFORMS.items() if enabled],
+                "has_caption": bool(content.get('caption')),
+                "hashtags_count": len(content.get('hashtags', [])),
+                "has_image": bool(content.get('image_url'))
+            }
+        )
+
+        # Post to Telegram if enabled
+        if POSTING_PLATFORMS.get("telegram", False):
+            try:
+                telegram_result = await post_to_telegram(content)
+                results["platforms"]["telegram"] = telegram_result
+                if telegram_result.get('status') == 'error':
+                    results["overall_status"] = "partial_failure"
+            except Exception as e:
+                results["platforms"]["telegram"] = {
+                    'status': 'error',
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                }
+                results["overall_status"] = "partial_failure"
+
+        # Post to Circlo if enabled
+        if POSTING_PLATFORMS.get("circlo", False):
+            try:
+                circlo_result = await circlo_client.post_content_to_circlo(content, user_preferences)
+                results["platforms"]["circlo"] = circlo_result
+                if circlo_result.get('status') == 'error':
+                    results["overall_status"] = "partial_failure"
+            except Exception as e:
+                results["platforms"]["circlo"] = {
+                    'status': 'error',
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat()
+                }
+                results["overall_status"] = "partial_failure"
+
+        debug_logger.complete_session(session_id, "completed" if results["overall_status"] == "success" else "partial_failure")
+        return results
+
+    except Exception as e:
+        debug_logger.log_step(
+            session_id=session_id,
+            step=PipelineStep.TELEGRAM_POSTING,
+            status="error",
+            error=str(e)
+        )
+        debug_logger.complete_session(session_id, "failed")
+
+        results["overall_status"] = "error"
+        results["error"] = str(e)
+        return results
 
 async def post_to_telegram(content: Dict[str, Any]) -> Dict[str, Any]:
     """Post content to Telegram"""
@@ -878,20 +1136,166 @@ def extract_content_from_crew_result(crew_result) -> List[Dict[str, Any]]:
         # Try to find JSON content in the result
         import re
 
-        # Look for JSON array in the text
-        json_match = re.search(r'\[.*\]', result_text, re.DOTALL)
+        # Look for JSON array in the text - more robust pattern
+        json_match = re.search(r'\[\s*\{.*?\}\s*\]', result_text, re.DOTALL)
         if json_match:
             json_content = json_match.group(0)
-            content_plan = json.loads(json_content)
-            if isinstance(content_plan, list):
-                return content_plan
 
-        # If no JSON found, return empty list
-        print("Could not extract JSON content from CrewAI result")
-        return []
+            # Preprocess JSON to handle common escape sequence issues
+            json_content = fix_json_escape_sequences(json_content)
+
+            try:
+                content_plan = json.loads(json_content)
+                if isinstance(content_plan, list):
+                    print(f"Successfully extracted {len(content_plan)} items from CrewAI result")
+                    return content_plan
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing error after preprocessing: {e}")
+                print(f"Problematic JSON content: {json_content[:500]}...")
+
+                # Try alternative approach: extract individual JSON objects
+                return extract_individual_json_objects(result_text)
+
+        # If no JSON array found, try to extract individual objects
+        return extract_individual_json_objects(result_text)
 
     except Exception as e:
         print(f"Error extracting content from CrewAI result: {e}")
+        return []
+
+def fix_json_escape_sequences(json_str: str) -> str:
+    """Fix common JSON escape sequence issues"""
+    # Fix invalid escape sequences by properly escaping backslashes
+    # Remove or fix common problematic escape patterns
+    import re
+
+    # Fix invalid \ escapes (except for valid ones like \n, \t, \", \\)
+    # This pattern finds backslashes that are not part of valid escape sequences
+    def fix_invalid_escapes(match):
+        char = match.group(1)
+        if char in ['n', 't', 'r', 'b', 'f', '"', '\\', '/', 'u']:
+            return f'\\{char}'  # Keep valid escapes
+        else:
+            return char  # Remove invalid backslash
+
+    # Apply the fix
+    fixed_json = re.sub(r'\\([^ntrbf"\\/u])', fix_invalid_escapes, json_str)
+
+    # Fix double-escaped quotes that should be single-escaped
+    fixed_json = re.sub(r'\\\\"', '\\"', fixed_json)
+
+    # Fix other common issues
+    fixed_json = fixed_json.replace('\\\\', '\\')  # Reduce double backslashes to single
+
+    return fixed_json
+
+def extract_individual_json_objects(text: str) -> List[Dict[str, Any]]:
+    """Extract individual JSON objects when array parsing fails"""
+    import re
+
+    # Find all JSON objects in the text
+    object_pattern = r'\{\s*"[^"]*"\s*:\s*[^{}]*\}'
+    matches = re.findall(object_pattern, text, re.DOTALL)
+
+    extracted_objects = []
+    for match in matches:
+        try:
+            # Fix escape sequences in each object
+            fixed_match = fix_json_escape_sequences(match)
+            obj = json.loads(fixed_match)
+            if isinstance(obj, dict):
+                extracted_objects.append(obj)
+        except json.JSONDecodeError:
+            # Skip malformed objects
+            continue
+
+    if extracted_objects:
+        print(f"Extracted {len(extracted_objects)} individual JSON objects")
+        return extracted_objects
+
+    print("Could not extract any valid JSON content from CrewAI result")
+    return []
+
+def generate_fallback_content(user_preferences: Dict[str, Any], schedule_params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Generate fallback content when CrewAI fails"""
+    try:
+        niche = user_preferences.get('niche', 'general content')
+        keywords = user_preferences.get('keywords', [])
+        total_posts = schedule_params.get('total_posts', 3)
+
+        # Generate simple but engaging content templates
+        content_templates = [
+            {
+                "caption": f"Excited to share more insights about {niche}! 🔥 What are your thoughts on this topic?",
+                "hashtags": [f"#{niche.replace(' ', '')}", "#insights", "#trending"] + [f"#{kw}" for kw in keywords[:3]],
+                "keywords": keywords[:3] if keywords else [niche],
+                "image_prompt": f"Professional and modern style image representing {niche} concept, clean design, trending aesthetic",
+                "engagement_elements": ["question", "call_to_action"]
+            },
+            {
+                "caption": f"Did you know? {niche.title()} is changing the game! 🚀 Here's what you need to know...",
+                "hashtags": [f"#{niche.replace(' ', '')}", "#didyouknow", "#innovation"] + [f"#{kw}" for kw in keywords[:2]],
+                "keywords": keywords[:2] if keywords else [niche, "innovation"],
+                "image_prompt": f"Informative and engaging visual about {niche}, educational style, modern design elements",
+                "engagement_elements": ["educational", "engaging_question"]
+            },
+            {
+                "caption": f"Sharing some valuable insights about {niche} that might surprise you! 💡",
+                "hashtags": [f"#{niche.replace(' ', '')}", "#valuable", "#knowledge"] + [f"#{kw}" for kw in keywords[:2]],
+                "keywords": keywords[:2] if keywords else [niche, "knowledge"],
+                "image_prompt": f"Inspirational and motivational image related to {niche}, warm colors, professional photography style",
+                "engagement_elements": ["inspirational", "value_proposition"]
+            },
+            {
+                "caption": f"Let's talk about the future of {niche}! 🎯 What trends are you seeing?",
+                "hashtags": [f"#{niche.replace(' ', '')}", "#future", "#trends"] + [f"#{kw}" for kw in keywords[:3]],
+                "keywords": keywords[:3] if keywords else [niche, "future", "trends"],
+                "image_prompt": f"Futuristic and forward-thinking image about {niche}, technology and innovation theme, vibrant colors",
+                "engagement_elements": ["forward_looking", "trend_discussion"]
+            },
+            {
+                "caption": f"Here's a fresh perspective on {niche} that you might not have considered! 🌟",
+                "hashtags": [f"#{niche.replace(' ', '')}", "#perspective", "#fresh"] + [f"#{kw}" for kw in keywords[:2]],
+                "keywords": keywords[:2] if keywords else [niche, "perspective"],
+                "image_prompt": f"Creative and artistic representation of {niche} concept, unique perspective, modern art style",
+                "engagement_elements": ["creative", "thought_provoking"]
+            }
+        ]
+
+        # Generate content for the required number of posts
+        content_plan = []
+        for i in range(min(total_posts, len(content_templates))):
+            template = content_templates[i % len(content_templates)].copy()
+
+            # Customize the template with specific keywords if available
+            if keywords:
+                keyword_variations = [
+                    f"exploring {keywords[0]}",
+                    f"insights about {keywords[1] if len(keywords) > 1 else keywords[0]}",
+                    f"the world of {keywords[2] if len(keywords) > 2 else keywords[0]}",
+                    f"discover {keywords[0]}",
+                    f"learn about {keywords[1] if len(keywords) > 1 else keywords[0]}"
+                ]
+
+                variation = keyword_variations[i % len(keyword_variations)]
+                template["caption"] = template["caption"].replace(niche, variation).replace(f"{niche.title()}", variation.title())
+
+            # Add post number and customize further
+            template["post_number"] = i + 1
+
+            # Ensure hashtags are clean (no spaces, special characters)
+            template["hashtags"] = [
+                f"#{tag.lstrip('#').replace(' ', '').replace('-', '').replace('_', '')}"
+                for tag in template["hashtags"]
+            ]
+
+            content_plan.append(template)
+
+        print(f"Generated {len(content_plan)} fallback content items for niche: {niche}")
+        return content_plan
+
+    except Exception as e:
+        print(f"Error generating fallback content: {e}")
         return []
 
 if __name__ == "__main__":

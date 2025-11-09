@@ -3,15 +3,135 @@ from langchain.llms.base import LLM
 from typing import Optional, List, Dict, Any
 import requests
 import json
+import time
+import threading
 from pydantic import Field
+
+# Rate limiting for Gemini API
+class RateLimiter:
+    def __init__(self, max_requests_per_minute: int = 15):  # Conservative limit
+        self.max_requests = max_requests_per_minute
+        self.requests = []
+        self.lock = threading.Lock()
+
+    def wait_if_needed(self):
+        with self.lock:
+            now = time.time()
+            # Remove requests older than 1 minute
+            self.requests = [req_time for req_time in self.requests if now - req_time < 60]
+
+            if len(self.requests) >= self.max_requests:
+                # Calculate wait time
+                oldest_request = min(self.requests)
+                wait_time = 60 - (now - oldest_request)
+                if wait_time > 0:
+                    print(f"Rate limit reached, waiting {wait_time:.1f} seconds...")
+                    time.sleep(wait_time)
+
+            self.requests.append(now)
+
+# Global rate limiter for Gemini
+gemini_rate_limiter = RateLimiter(max_requests_per_minute=15)
+
+class FallbackLLM:
+    """Fallback LLM manager that automatically switches providers on failure"""
+
+    def __init__(self):
+        self.providers = []
+        self.current_index = 0
+        self._init_providers()
+
+    def _init_providers(self):
+        """Initialize available LLM providers based on environment variables"""
+        import os
+
+        # Check for available API keys and create providers
+        if os.getenv("GEMINI_API_KEY"):
+            try:
+                self.providers.append({
+                    'name': 'gemini',
+                    'instance': GeminiLLM(api_key=os.getenv("GEMINI_API_KEY"))
+                })
+                print("✅ Gemini provider initialized")
+            except Exception as e:
+                print(f"❌ Failed to initialize Gemini: {e}")
+
+        if os.getenv("ZAI_API_KEY"):
+            try:
+                self.providers.append({
+                    'name': 'zai',
+                    'instance': ZAILLM(api_key=os.getenv("ZAI_API_KEY"))
+                })
+                print("✅ ZAI provider initialized")
+            except Exception as e:
+                print(f"❌ Failed to initialize ZAI: {e}")
+
+        if os.getenv("DEEPSEEK_API_KEY"):
+            try:
+                self.providers.append({
+                    'name': 'deepseek',
+                    'instance': DeepseekLLM(api_key=os.getenv("DEEPSEEK_API_KEY"))
+                })
+                print("✅ Deepseek provider initialized")
+            except Exception as e:
+                print(f"❌ Failed to initialize Deepseek: {e}")
+
+        if not self.providers:
+            raise ValueError("No LLM providers available. Please configure API keys.")
+
+        print(f"🚀 Initialized {len(self.providers)} LLM providers: {[p['name'] for p in self.providers]}")
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        """Try each provider in sequence until one succeeds"""
+
+        for _ in range(len(self.providers)):
+            provider = self.providers[self.current_index]
+
+            try:
+                print(f"🤖 Trying {provider['name']} provider...")
+                result = provider['instance']._call(prompt, stop)
+
+                # Check if the result indicates a quota/rate limit error
+                if "quota exceeded" in result.lower() or "rate limit" in result.lower() or "429" in result:
+                    print(f"⚠️  {provider['name']} provider quota exceeded. Trying next provider...")
+                    self.current_index = (self.current_index + 1) % len(self.providers)
+                    continue
+
+                print(f"✅ {provider['name']} provider succeeded")
+                return result
+
+            except Exception as e:
+                print(f"❌ {provider['name']} provider failed: {e}")
+                self.current_index = (self.current_index + 1) % len(self.providers)
+                continue
+
+        return "Error: All LLM providers failed. Please check API keys and quotas."
+
+    @property
+    def model(self):
+        return "fallback_llm"
+
+    @property
+    def model_identifier(self):
+        return "fallback_llm"
+
+# Global fallback LLM instance
+fallback_llm = None
+
+def get_fallback_llm():
+    """Get or create the fallback LLM instance"""
+    global fallback_llm
+    if fallback_llm is None:
+        fallback_llm = FallbackLLM()
+    return fallback_llm
 
 class GeminiLLM(LLM):
     """Custom LangChain wrapper for Gemini models using ChatGoogleGenerativeAI"""
     api_key: str
-    model_name: str = "gemini-2.0-flash-exp"
+    model_name: str = "gemini-2.5-pro"
     _model: ChatGoogleGenerativeAI = Field(exclude=True)
 
-    def __init__(self, api_key: str, model_name: str = "gemini-2.0-flash-exp", **kwargs):
+    def __init__(self, api_key: str, model_name: str = "gemini-2.5-pro", **kwargs):
         # Initialize Pydantic model first
         super().__init__(api_key=api_key, model_name=model_name, **kwargs)
         # Set internal attributes
@@ -42,11 +162,39 @@ class GeminiLLM(LLM):
         }
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
-        try:
-            response = self._model.invoke(prompt)
-            return response.content
-        except Exception as e:
-            return f"Error generating response: {str(e)}"
+        max_retries = 3
+        base_delay = 2  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                # Apply rate limiting
+                gemini_rate_limiter.wait_if_needed()
+
+                response = self._model.invoke(prompt)
+                return response.content
+
+            except Exception as e:
+                error_str = str(e)
+
+                # Check if it's a quota/rate limit error
+                if "429" in error_str or "quota" in error_str.lower() or "ResourceExhausted" in error_str:
+                    if attempt < max_retries - 1:
+                        # Exponential backoff
+                        delay = base_delay * (2 ** attempt)
+                        print(f"Gemini API quota exceeded. Retrying in {delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        return "Error: Gemini API quota exceeded. Please try again later or switch to a different model."
+
+                # For other errors, don't retry
+                if attempt == max_retries - 1:
+                    return f"Error generating response: {str(e)}"
+
+                # For non-quota errors, shorter retry
+                time.sleep(1)
+
+        return f"Error generating response after {max_retries} attempts"
 
 class ZAILLM(LLM):
     """Custom LangChain wrapper for ZAI models"""

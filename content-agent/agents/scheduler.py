@@ -190,7 +190,7 @@ class PostScheduler:
             job_id = f"{schedule_id}_post_{i}"
 
             self.scheduler.add_job(
-                func=self._execute_post,
+                func=self._execute_post_wrapper,
                 trigger=DateTrigger(run_date=post_time),
                 args=[schedule_id, job_id, content, post_callback],
                 id=job_id,
@@ -211,7 +211,39 @@ class PostScheduler:
         print(f"Created posting schedule {schedule_id} for {schedule_params['total_posts']} posts")
         return schedule_id
 
-    def _execute_post(self, schedule_id: str, job_id: str, content: Dict[str, Any],
+    def _execute_post_wrapper(self, schedule_id: str, job_id: str, content: Dict[str, Any],
+                             post_callback: Callable):
+        """Wrapper to execute async post function in sync context"""
+        import asyncio
+        try:
+            # Try to get existing event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Create a new task in the running loop
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self._execute_post(schedule_id, job_id, content, post_callback))
+                    future.result()  # Wait for completion
+            else:
+                # No loop running, just run the async function
+                asyncio.run(self._execute_post(schedule_id, job_id, content, post_callback))
+        except Exception as e:
+            print(f"Error in post execution wrapper: {e}")
+            # Fallback: record the failure
+            if schedule_id in self.active_schedules:
+                self.active_schedules[schedule_id]['posts_failed'] += 1
+
+            post_record = {
+                'schedule_id': schedule_id,
+                'job_id': job_id,
+                'content': content,
+                'posted_at': datetime.now().isoformat(),
+                'status': PostStatus.FAILED.value,
+                'error': f'Wrapper error: {str(e)}'
+            }
+            self.post_history.append(post_record)
+
+    async def _execute_post(self, schedule_id: str, job_id: str, content: Dict[str, Any],
                      post_callback: Callable):
         """Execute a single post"""
         try:
@@ -231,8 +263,22 @@ class PostScheduler:
                 'status': PostStatus.COMPLETED.value
             }
 
-            # Execute the post callback
-            result = post_callback(content)
+            # Execute the post callback (handle both sync and async callbacks)
+            import asyncio
+            try:
+                if asyncio.iscoroutinefunction(post_callback):
+                    # Handle async callback
+                    result = await post_callback(content)
+                else:
+                    # Handle sync callback
+                    result = post_callback(content)
+            except Exception as callback_error:
+                print(f"Error in post callback: {callback_error}")
+                result = {
+                    'status': 'error',
+                    'error': f'Callback error: {str(callback_error)}',
+                    'timestamp': datetime.now().isoformat()
+                }
 
             # Update post record with result
             post_record['result'] = result
