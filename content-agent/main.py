@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 import os
@@ -11,12 +12,66 @@ from agents.crew import ContentCrew
 from agents.scheduler import PostScheduler
 from agents.telegram_client import TelegramClient
 from agents.image_generator import ImageGenerator
+from agents.circlo_client import CircloClient
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-app = FastAPI(title="Automated Content Generation Agent", version="1.0.0")
+# Global instances
+scheduler = None
+telegram_client = None
+image_generator = None
+circlo_client = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for startup and shutdown"""
+    global scheduler, telegram_client, image_generator, circlo_client
+
+    # Startup
+    print("🚀 Starting Automated Content Generation Agent...")
+
+    # Initialize global instances
+    scheduler = PostScheduler()
+    telegram_client = TelegramClient()
+    image_generator = ImageGenerator()
+    circlo_client = CircloClient()
+
+    # Test Telegram connection
+    try:
+        test_result = await telegram_client.test_connection()
+        if test_result['status'] == 'success':
+            print("✅ Telegram connection successful")
+        else:
+            print(f"❌ Telegram connection failed: {test_result['error']}")
+    except Exception as e:
+        print(f"❌ Error testing Telegram connection: {e}")
+
+    # Test Circlo authentication
+    try:
+        test_result = await circlo_client.test_connection()
+        if test_result['status'] == 'success':
+            print("✅ Circlo authentication successful")
+            if circlo_client.is_authenticated():
+                print(f"✅ Circlo user authenticated: {circlo_client.get_user_data()}")
+        else:
+            print(f"❌ Circlo authentication failed: {test_result['message']}")
+    except Exception as e:
+        print(f"❌ Error testing Circlo authentication: {e}")
+
+    yield
+
+    # Shutdown
+    print("🛑 Shutting down Automated Content Generation Agent...")
+    if scheduler:
+        scheduler.shutdown()
+
+app = FastAPI(
+    title="Automated Content Generation Agent",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 # Configure CORS
 app.add_middleware(
@@ -27,10 +82,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global instances
-scheduler = PostScheduler()
-telegram_client = TelegramClient()
-image_generator = ImageGenerator()
 
 # Pydantic models for API requests/responses
 class CircloPayload(BaseModel):
@@ -38,6 +89,10 @@ class CircloPayload(BaseModel):
     event_type: str
     user_id: str
     data: Dict[str, Any]
+
+class CircloAuthRequest(BaseModel):
+    """Model for Circlo authentication request"""
+    jwt_code: Optional[str] = None  # If not provided, will use environment variable
 
 class ScheduleRequest(BaseModel):
     """Model for scheduling content posts"""
@@ -65,27 +120,6 @@ class ContentResponse(BaseModel):
 active_schedules = {}
 content_cache = {}
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the application on startup"""
-    print("🚀 Starting Automated Content Generation Agent...")
-
-    # Test Telegram connection
-    try:
-        test_result = await telegram_client.test_connection()
-        if test_result['status'] == 'success':
-            print("✅ Telegram connection successful")
-        else:
-            print(f"❌ Telegram connection failed: {test_result['error']}")
-    except Exception as e:
-        print(f"❌ Error testing Telegram connection: {e}")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up on shutdown"""
-    print("🛑 Shutting down Automated Content Generation Agent...")
-    scheduler.shutdown()
-
 @app.get("/")
 async def root():
     """Root endpoint"""
@@ -110,6 +144,81 @@ async def health_check():
             "scheduler": "active" if scheduler else "inactive"
         }
     }
+
+@app.post("/circlo-auth")
+async def circlo_authenticate(request: CircloAuthRequest):
+    """
+    Authenticate with Circlo API using JWT token
+
+    Args:
+        request: Authentication request containing optional JWT code
+    """
+    try:
+        # If JWT code is provided in request, temporarily override the client's token
+        original_jwt = circlo_client.jwt_token
+        if request.jwt_code:
+            circlo_client.jwt_token = request.jwt_code
+
+        # Perform authentication
+        auth_result = await circlo_client.authenticate()
+
+        # Restore original JWT if we temporarily changed it
+        if request.jwt_code:
+            circlo_client.jwt_token = original_jwt
+
+        if auth_result["success"]:
+            return {
+                "status": "success",
+                "message": "Authentication successful",
+                "user_data": auth_result.get("data"),
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Authentication failed",
+                "error": auth_result.get("error"),
+                "timestamp": datetime.now().isoformat()
+            }, 400
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": "Authentication error",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }, 500
+
+@app.get("/circlo-status")
+async def circlo_status():
+    """
+    Get current Circlo authentication status
+    """
+    try:
+        if not circlo_client:
+            return {
+                "status": "error",
+                "message": "Circlo client not initialized",
+                "authenticated": False,
+                "timestamp": datetime.now().isoformat()
+            }, 500
+
+        return {
+            "status": "success",
+            "authenticated": circlo_client.is_authenticated(),
+            "user_data": circlo_client.get_user_data(),
+            "message": "Circlo client is ready" if circlo_client.is_authenticated() else "Not authenticated",
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": "Status check error",
+            "error": str(e),
+            "authenticated": False,
+            "timestamp": datetime.now().isoformat()
+        }, 500
 
 @app.post("/circlo-hook")
 async def circlo_webhook(payload: CircloPayload, background_tasks: BackgroundTasks):

@@ -1,19 +1,31 @@
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.llms.base import LLM
 from typing import Optional, List, Dict, Any
-import google.generativeai as genai
 import requests
 import json
 from pydantic import Field
 
 class GeminiLLM(LLM):
-    """Custom LangChain wrapper for Gemini models"""
+    """Custom LangChain wrapper for Gemini models using ChatGoogleGenerativeAI"""
     api_key: str
     model_name: str = "gemini-1.5-flash"
+    _model: ChatGoogleGenerativeAI = Field(exclude=True)
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel(self.model_name)
+    def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash", **kwargs):
+        llm_kwargs = {
+            'api_key': api_key,
+            'model_name': model_name,
+            **kwargs
+        }
+        super().__init__(**llm_kwargs)
+        object.__setattr__(self, '_model', ChatGoogleGenerativeAI(
+            model=self.model_name,
+            google_api_key=self.api_key
+        ))
+
+    @property
+    def model(self):
+        return self._model
 
     @property
     def _llm_type(self) -> str:
@@ -21,8 +33,8 @@ class GeminiLLM(LLM):
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
         try:
-            response = self.model.generate_content(prompt)
-            return response.text
+            response = self.model.invoke(prompt)
+            return response.content
         except Exception as e:
             return f"Error generating response: {str(e)}"
 
