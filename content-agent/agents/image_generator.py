@@ -2,7 +2,7 @@ import replicate
 import os
 import json
 from typing import List, Dict, Any, Optional
-from agents.llm_wrappers import GeminiLLM, ZAILLM
+from agents.llm_wrappers import GeminiLLM, ZAILLM, DeepseekLLM
 import time
 
 class ImageGenerator:
@@ -16,8 +16,10 @@ class ImageGenerator:
             return GeminiLLM(api_key=os.getenv("GEMINI_API_KEY"))
         elif os.getenv("CORE_AGENT_TYPE") == "zai":
             return ZAILLM(api_key=os.getenv("ZAI_API_KEY"))
+        elif os.getenv("CORE_AGENT_TYPE") == "deepseek":
+            return DeepseekLLM(api_key=os.getenv("DEEPSEEK_API_KEY"))
         else:
-            raise ValueError("Unsupported CORE_AGENT_TYPE. Use 'gemini' or 'zai'.")
+            raise ValueError("Unsupported CORE_AGENT_TYPE. Use 'gemini', 'zai', or 'deepseek'.")
 
     def optimize_prompts_for_replicate(self, content_plan: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

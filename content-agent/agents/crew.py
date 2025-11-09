@@ -1,6 +1,6 @@
 from crewai import Agent, Task, Crew, Process
 from langchain_google_genai import ChatGoogleGenerativeAI
-from agents.llm_wrappers import GeminiLLM, ZAILLM
+from agents.llm_wrappers import GeminiLLM, ZAILLM, DeepseekLLM
 import os
 import json
 
@@ -33,8 +33,14 @@ class ContentCrew:
             if not api_key:
                 raise ValueError("ZAI_API_KEY environment variable is not set")
             return ZAILLM(api_key=api_key)
+        elif core_agent_type == "deepseek":
+            api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("REPLICATE_API_KEY")
+            if not api_key:
+                raise ValueError("DEEPSEEK_API_KEY or REPLICATE_API_KEY environment variable is not set for Deepseek")
+            # Use REPLICATE_API_KEY if available, fallback to DEEPSEEK_API_KEY
+            return DeepseekLLM(api_key=api_key)
         else:
-            raise ValueError("Unsupported CORE_AGENT_TYPE. Use 'gemini' or 'zai'.")
+            raise ValueError("Unsupported CORE_AGENT_TYPE. Use 'gemini', 'zai', or 'deepseek'.")
 
     def _create_agents(self):
         # Define all the specialized agents using the custom LLM

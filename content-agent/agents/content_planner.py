@@ -1,7 +1,7 @@
 import json
 from typing import List, Dict, Any, Optional
 import os
-from agents.llm_wrappers import GeminiLLM, ZAILLM
+from agents.llm_wrappers import GeminiLLM, ZAILLM, DeepseekLLM
 from datetime import datetime, timedelta
 
 class ContentPlanner:
@@ -13,8 +13,10 @@ class ContentPlanner:
             return GeminiLLM(api_key=os.getenv("GEMINI_API_KEY"))
         elif os.getenv("CORE_AGENT_TYPE") == "zai":
             return ZAILLM(api_key=os.getenv("ZAI_API_KEY"))
+        elif os.getenv("CORE_AGENT_TYPE") == "deepseek":
+            return DeepseekLLM(api_key=os.getenv("DEEPSEEK_API_KEY"))
         else:
-            raise ValueError("Unsupported CORE_AGENT_TYPE. Use 'gemini' or 'zai'.")
+            raise ValueError("Unsupported CORE_AGENT_TYPE. Use 'gemini', 'zai', or 'deepseek'.")
 
     def create_content_plan(self, trends: List[Dict[str, Any]], user_preferences: Dict[str, Any],
                           num_posts: int = 10) -> List[Dict[str, Any]]:

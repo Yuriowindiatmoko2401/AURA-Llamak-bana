@@ -3,7 +3,7 @@ import json
 from bs4 import BeautifulSoup
 from typing import List, Dict, Any
 import os
-from agents.llm_wrappers import GeminiLLM, ZAILLM
+from agents.llm_wrappers import GeminiLLM, ZAILLM, DeepseekLLM
 
 class TrendResearcher:
     def __init__(self):
@@ -14,8 +14,10 @@ class TrendResearcher:
             return GeminiLLM(api_key=os.getenv("GEMINI_API_KEY"))
         elif os.getenv("CORE_AGENT_TYPE") == "zai":
             return ZAILLM(api_key=os.getenv("ZAI_API_KEY"))
+        elif os.getenv("CORE_AGENT_TYPE") == "deepseek":
+            return DeepseekLLM(api_key=os.getenv("DEEPSEEK_API_KEY"))
         else:
-            raise ValueError("Unsupported CORE_AGENT_TYPE. Use 'gemini' or 'zai'.")
+            raise ValueError("Unsupported CORE_AGENT_TYPE. Use 'gemini', 'zai', or 'deepseek'.")
 
     def research_trends(self, niche: str, keywords: List[str]) -> List[Dict[str, Any]]:
         """
